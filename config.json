@@ -1,0 +1,5 @@
+{
+    "download_directory": "./downloads",
+    "max_threads": 10,
+    "chunk_size": 8192
+}
