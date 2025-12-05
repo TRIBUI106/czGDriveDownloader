@@ -133,6 +133,60 @@ class GDriveDownloader:
                 'file_id': file_id,
                 'response': None
             }
+
+    def list_folder_items(self, folder_id, parent_folder_name=None, depth=0, max_depth=5):
+        """Recursively list files inside a Google Drive folder by scraping the folder page.
+
+        Returns a list of tuples: (file_id, folder_name) for files to download.
+        """
+        if depth > max_depth:
+            return []
+
+        try:
+            url = f"https://drive.google.com/drive/folders/{folder_id}"
+            response = self.session.get(url)
+            text = response.text if response is not None else ""
+
+            # Find potential IDs on the folder page
+            found_ids = set()
+            patterns = [r'/file/d/([a-zA-Z0-9_-]+)', r'/folders/([a-zA-Z0-9_-]+)', r'id=([a-zA-Z0-9_-]+)']
+            for pattern in patterns:
+                for m in re.findall(pattern, text):
+                    if m and m != folder_id:
+                        found_ids.add(m)
+
+            results = []
+            # Use provided parent folder name or derive one
+            folder_name = parent_folder_name or self.get_folder_name(folder_id)
+
+            for fid in found_ids:
+                # Be conservative: treat as folder if the URL pattern for folders was found
+                # Otherwise, check via is_folder
+                is_f = False
+                # Quick heuristic: if the raw text contains '/folders/{fid}' assume folder
+                if f"/folders/{fid}" in text:
+                    is_f = True
+                else:
+                    try:
+                        is_f = self.is_folder(fid)
+                    except Exception:
+                        is_f = False
+
+                if is_f:
+                    # Recurse into subfolder, nest the folder name
+                    try:
+                        child_name = self.get_folder_name(fid)
+                        combined_name = os.path.join(folder_name, child_name)
+                    except Exception:
+                        combined_name = folder_name
+
+                    results.extend(self.list_folder_items(fid, parent_folder_name=combined_name, depth=depth+1, max_depth=max_depth))
+                else:
+                    results.append((fid, folder_name))
+
+            return results
+        except Exception:
+            return []
     
     def get_extension_from_content_type(self, content_type):
         """Get file extension from content type"""
@@ -232,15 +286,21 @@ class GDriveDownloader:
         for i, link in enumerate(drive_links, 1):
             file_id = self.extract_file_id(link)
             if file_id:
-                # Get appropriate folder name
+                # If link is a folder, expand its contents and queue files recursively
                 if self.is_folder(file_id):
                     folder_name = self.get_folder_name(file_id)
+                    print(f"[{i}/{len(drive_links)}] Expanding folder: {file_id} -> {folder_name}")
+                    items = self.list_folder_items(file_id, parent_folder_name=folder_name)
+                    if not items:
+                        print(f"  ⚠ No items found or unable to list folder: {file_id}")
+                    else:
+                        for fid, fname in items:
+                            tasks.append((fid, fname))
+                        print(f"  → Queued {len(items)} items from folder {file_id}")
                 else:
-                    # For files, create a meaningful folder name or use None for root
-                    folder_name = None  # Download directly to root
-                
-                tasks.append((file_id, folder_name))
-                print(f"[{i}/{len(drive_links)}] Queued: {file_id}")
+                    # For files, download directly to root (or specify folder if desired)
+                    tasks.append((file_id, None))
+                    print(f"[{i}/{len(drive_links)}] Queued file: {file_id}")
             else:
                 print(f"✗ Invalid link: {link}")
         
